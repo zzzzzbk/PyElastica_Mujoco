@@ -1,0 +1,9 @@
+# PyElastica + MuJoCo GUI design tool
+# Tested with the conda env `python311` (Python 3.11).
+pyelastica>=1.0.0
+mujoco>=3.0
+numpy
+PySide6>=6.5
+imageio
+matplotlib
+tqdm
