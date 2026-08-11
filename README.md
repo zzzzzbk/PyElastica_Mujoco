@@ -17,7 +17,7 @@ simulation and animate the result, all in one window.
 
 ## Quick start
 
-Install the dependencies (Python 3.11 recommended):
+Install the dependencies (Python 3.10+ recommended):
 
 ```bash
 pip install -r requirements.txt
