@@ -10,15 +10,13 @@ drag), updated for the installed pyelastica 1.0.0 API:
 
 The simulation records ``time`` / ``position`` / ``radius`` / ``directors``
 into a ``defaultdict(list)`` with the same shape produced by
-``utils.VisualizerDictCallBack``, and ``save_dat`` writes the same pickle
-layout as ``run_buckling_test.save_data`` so results remain loadable through
-``utils.load_data``.
+``utils.VisualizerDictCallBack``. Persistence uses the versioned, portable
+multi-rod ``pyelastica-rod-trajectory`` DAT contract while retaining legacy
+callback DAT loading.
 """
 from __future__ import annotations
 
-import pickle
 from collections import defaultdict
-from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
@@ -38,6 +36,9 @@ from elastica import (
     NoForces,
     Plane,
     RodPlaneContact,
+    RodPlaneContactWithAnisotropicFriction,
+    RodSelfContact,
+    RodRodContact,
     CallBackBaseClass,
     AnalyticalLinearDamper,
 )
@@ -45,6 +46,12 @@ from elastica.timestepper.symplectic_steppers import PositionVerlet
 from elastica._calculus import _isnan_check
 
 from rod_config import RodConfig, SimConfig
+from rod_trajectory import (
+    histories_to_arrays,
+    history_to_arrays,
+    load_dat,
+    save_dat,
+)
 
 
 class _Simulator(
@@ -243,16 +250,37 @@ def build_simulator(rod_cfg: RodConfig, sim_cfg: SimConfig):
     for fx in sim_cfg.fixtures:
         _add_fixture(sim, rod, fx, n_nodes)
 
-    # Ground plane + optional collision
-    if env.plane_on and env.plane_collision:
+    # Rod self contact
+    if env.self_contact_on:
+        sim.detect_contact_between(rod, rod).using(
+            RodSelfContact, k=env.self_contact_k, nu=env.self_contact_nu
+        )
+
+    # Rod mutual contact (only meaningful for multi-rod setups; with a single
+    # rod this is equivalent to self contact, so skip it to avoid duplication).
+
+    # Ground plane + optional contact / friction
+    if env.plane_on and (env.plane_contact_on or env.plane_friction_on):
         plane = Plane(
             plane_origin=np.array([0.0, 0.0, env.plane_z]),
             plane_normal=np.array([0.0, 0.0, 1.0]),
         )
         sim.append(plane)
-        sim.detect_contact_between(rod, plane).using(
-            RodPlaneContact, k=env.collision_k, nu=env.collision_nu
-        )
+        if env.plane_friction_on:
+            # Isotropic friction: same coefficient forward/backward/sideways.
+            mu = 0.5
+            sim.detect_contact_between(rod, plane).using(
+                RodPlaneContactWithAnisotropicFriction,
+                k=env.plane_friction_k,
+                nu=env.plane_friction_nu,
+                slip_velocity_tol=1e-4,
+                static_mu_array=np.array([mu, mu, mu]),
+                kinetic_mu_array=np.array([mu, mu, mu]),
+            )
+        else:
+            sim.detect_contact_between(rod, plane).using(
+                RodPlaneContact, k=env.plane_contact_k, nu=env.plane_contact_nu
+            )
 
     # Recording callback
     step_skip = max(1, int(1.0 / (sim_cfg.recording_fps * sim_cfg.time_step)))
@@ -300,32 +328,3 @@ def run(
     # Convert to plain dict of arrays for downstream use / pickling.
     history = {key: list(val) for key, val in params.items()}
     return history
-
-
-# --- persistence (compatible with run_buckling_test / utils.load_data) -------
-
-def save_dat(history: dict, recording_fps: int, path: str | Path, **extra) -> None:
-    """Save history as pickle in the run_buckling_test.save_data layout."""
-    path = Path(path)
-    if path.suffix == "":
-        path = path.with_suffix(".dat")
-    data = dict(recording_fps=recording_fps, systems=[history], **extra)
-    with open(path, "wb") as f:
-        pickle.dump(data, f)
-
-
-def load_dat(path: str | Path) -> tuple[dict, int]:
-    """Load a .dat file; return (history_dict, recording_fps)."""
-    with open(Path(path), "rb") as f:
-        data = pickle.load(f)
-    history = data["systems"][0]
-    fps = int(data.get("recording_fps", 30))
-    return history, fps
-
-
-def history_to_arrays(history: dict):
-    """Return (positions T x3x(N+1), radii (N,), times (T,)) from a history dict."""
-    positions = np.asarray(history["position"])  # (T, 3, N+1)
-    radii = np.asarray(history["radius"][0])      # (N,)
-    times = np.asarray(history["time"])           # (T,)
-    return positions, radii, times

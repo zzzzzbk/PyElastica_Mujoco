@@ -138,7 +138,7 @@ class MainWindow(QMainWindow):
         self._thread = None
         self._worker = None
         self._playing = False
-        self._history = None
+        self._histories = None
 
         # Model-tree data (SolidWorks-style lists).
         self._fixtures: list[Fixture] = [Fixture(kind="fixed", location="start")]
@@ -228,14 +228,28 @@ class MainWindow(QMainWindow):
         eg.addWidget(QLabel("plane z (m)"), r, 1)
         eg.addWidget(self.sp_plane_z, r, 2); r += 1
 
-        self.chk_collision = QCheckBox("Plane collision")
-        eg.addWidget(self.chk_collision, r, 0, 1, 3); r += 1
+        # Contact toggles: each has its own k / nu entry boxes.
+        def _contact_row(row, label, k_val=50.0, nu_val=10.0):
+            chk = QCheckBox(label)
+            eg.addWidget(chk, row, 0)
+            k = QDoubleSpinBox(); k.setDecimals(2); k.setRange(0.0, 1e6)
+            k.setValue(k_val); k.setMaximumWidth(80)
+            nu = QDoubleSpinBox(); nu.setDecimals(2); nu.setRange(0.0, 1e6)
+            nu.setValue(nu_val); nu.setMaximumWidth(80)
+            k.setEnabled(False); nu.setEnabled(False)
+            chk.toggled.connect(k.setEnabled)
+            chk.toggled.connect(nu.setEnabled)
+            eg.addWidget(QLabel("k / nu"), row, 1)
+            sub = QHBoxLayout()
+            sub.setContentsMargins(0, 0, 0, 0)
+            sub.addWidget(k); sub.addWidget(nu)
+            eg.addLayout(sub, row, 2)
+            return chk, k, nu
 
-        eg.addWidget(QLabel("Contact k / nu"), r, 0)
-        self.sp_ck = QDoubleSpinBox(); self.sp_ck.setDecimals(2); self.sp_ck.setRange(0.0, 1e6); self.sp_ck.setValue(50.0); self.sp_ck.setMaximumWidth(80)
-        self.sp_cnu = QDoubleSpinBox(); self.sp_cnu.setDecimals(2); self.sp_cnu.setRange(0.0, 1e6); self.sp_cnu.setValue(10.0); self.sp_cnu.setMaximumWidth(80)
-        eg.addWidget(self.sp_ck, r, 1)
-        eg.addWidget(self.sp_cnu, r, 2); r += 1
+        self.chk_self_contact, self.sp_self_k, self.sp_self_nu = _contact_row(r, "Rod self contact"); r += 1
+        self.chk_mutual_contact, self.sp_mutual_k, self.sp_mutual_nu = _contact_row(r, "Rod mutual contact"); r += 1
+        self.chk_plane_contact, self.sp_plane_k, self.sp_plane_nu = _contact_row(r, "Plane contact"); r += 1
+        self.chk_plane_friction, self.sp_friction_k, self.sp_friction_nu = _contact_row(r, "Plane friction"); r += 1
         env_box.setLayout(eg)
         col.addWidget(env_box)
         col.addStretch(1)
@@ -499,9 +513,18 @@ class MainWindow(QMainWindow):
             gravity_g=self.sp_g.value(),
             plane_on=self.chk_plane.isChecked(),
             plane_z=self.sp_plane_z.value(),
-            plane_collision=self.chk_collision.isChecked(),
-            collision_k=self.sp_ck.value(),
-            collision_nu=self.sp_cnu.value(),
+            self_contact_on=self.chk_self_contact.isChecked(),
+            self_contact_k=self.sp_self_k.value(),
+            self_contact_nu=self.sp_self_nu.value(),
+            mutual_contact_on=self.chk_mutual_contact.isChecked(),
+            mutual_contact_k=self.sp_mutual_k.value(),
+            mutual_contact_nu=self.sp_mutual_nu.value(),
+            plane_contact_on=self.chk_plane_contact.isChecked(),
+            plane_contact_k=self.sp_plane_k.value(),
+            plane_contact_nu=self.sp_plane_nu.value(),
+            plane_friction_on=self.chk_plane_friction.isChecked(),
+            plane_friction_k=self.sp_friction_k.value(),
+            plane_friction_nu=self.sp_friction_nu.value(),
         )
 
     def sim_config(self) -> SimConfig:
@@ -542,9 +565,18 @@ class MainWindow(QMainWindow):
         self.sp_g.setValue(env.gravity_g)
         self.chk_plane.setChecked(env.plane_on)
         self.sp_plane_z.setValue(env.plane_z)
-        self.chk_collision.setChecked(env.plane_collision)
-        self.sp_ck.setValue(env.collision_k)
-        self.sp_cnu.setValue(env.collision_nu)
+        self.chk_self_contact.setChecked(env.self_contact_on)
+        self.sp_self_k.setValue(env.self_contact_k)
+        self.sp_self_nu.setValue(env.self_contact_nu)
+        self.chk_mutual_contact.setChecked(env.mutual_contact_on)
+        self.sp_mutual_k.setValue(env.mutual_contact_k)
+        self.sp_mutual_nu.setValue(env.mutual_contact_nu)
+        self.chk_plane_contact.setChecked(env.plane_contact_on)
+        self.sp_plane_k.setValue(env.plane_contact_k)
+        self.sp_plane_nu.setValue(env.plane_contact_nu)
+        self.chk_plane_friction.setChecked(env.plane_friction_on)
+        self.sp_friction_k.setValue(env.plane_friction_k)
+        self.sp_friction_nu.setValue(env.plane_friction_nu)
 
         self.sp_damp.setValue(sim.damping_constant)
         self.sp_final.setValue(sim.final_time)
@@ -619,16 +651,17 @@ class MainWindow(QMainWindow):
 
     def _on_finished(self, history, fps):
         self._cleanup_thread()
-        self._load_history(history, fps)
+        self._load_histories([history], fps)
 
-    def _load_history(self, history, fps):
-        if not history.get("time"):
+    def _load_histories(self, histories, fps):
+        if not histories or len(np.asarray(histories[0].get("time", []))) == 0:
             QMessageBox.warning(self, "No data", "Simulation produced no frames.")
             return
-        self._history = history
+        self._histories = histories
         self._history_fps = fps
-        positions, radii, times = es.history_to_arrays(history)
-        self.view.set_trajectory(positions, radii, times)
+        positions, radii, times = es.histories_to_arrays(histories)
+        names = [item.get("name", f"rod_{i}") for i, item in enumerate(histories)]
+        self.view.set_trajectories(positions, radii, times, names=names)
         n = self.view.n_frames
         self.frame_slider.setRange(0, max(0, n - 1))
         self.frame_slider.setValue(0)
@@ -671,7 +704,7 @@ class MainWindow(QMainWindow):
     # --- save / load ---------------------------------------------------------
 
     def _on_save_data(self):
-        if self._history is None:
+        if self._histories is None:
             QMessageBox.information(self, "No data", "Run a simulation first.")
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -680,7 +713,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            es.save_dat(self._history, getattr(self, "_history_fps", 30), path)
+            es.save_dat(self._histories, getattr(self, "_history_fps", 30), path)
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
 
@@ -691,12 +724,12 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            history, fps = es.load_dat(path)
+            histories, fps = es.load_dat(path)
         except Exception as exc:
             QMessageBox.critical(self, "Load failed", str(exc))
             return
         self._stop_playback()
-        self._load_history(history, fps)
+        self._load_histories(histories, fps)
 
     def _on_save_config(self):
         path, _ = QFileDialog.getSaveFileName(

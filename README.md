@@ -29,3 +29,12 @@ Launch the GUI:
 python elastica_gui.py
 ```
 
+## Rod trajectory DAT files
+
+The GUI loads and renders one or multiple rods from the shared versioned
+`pyelastica-rod-trajectory` DAT format. Each system contains common frame times,
+positions shaped `[frames, 3, nodes]`, a static element-radius profile, and
+optional directors. Arrays are stored as portable dtype/shape/bytes records so
+files work across different NumPy builds. Legacy single-rod PyElastica callback
+DAT files remain supported. DAT is a pickle container and should only be opened
+from trusted sources. See [the complete format contract](docs/DAT_FORMAT.md).

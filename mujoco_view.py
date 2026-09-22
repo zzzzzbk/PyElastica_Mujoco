@@ -6,8 +6,7 @@ render into a Qt widget. A minimal static model (ground plane + light) provides
 the world; the rod itself is decorative scene geometry, so arbitrary taper and
 bending are handled without building a per-node body tree.
 
-Supports a static preview (undeformed rod, for geometry checking) and playback
-of a full trajectory.
+Supports a static preview and playback of one or multiple rod trajectories.
 """
 from __future__ import annotations
 
@@ -42,7 +41,19 @@ _STATIC_XML = """
 
 _FLOOR_GROUP = 2  # geom group used to show/hide the ground plane
 
-ROD_COLOR = np.array([0.20, 0.55, 0.90, 1.0], dtype=np.float32)
+ROD_COLORS = np.asarray(
+    [
+        [0.20, 0.55, 0.90, 1.0],
+        [0.95, 0.45, 0.20, 1.0],
+        [0.35, 0.75, 0.40, 1.0],
+        [0.75, 0.40, 0.85, 1.0],
+        [0.95, 0.75, 0.20, 1.0],
+        [0.20, 0.75, 0.75, 1.0],
+        [0.90, 0.35, 0.55, 1.0],
+        [0.65, 0.65, 0.70, 1.0],
+    ],
+    dtype=np.float32,
+)
 
 
 class MujocoRodView(QWidget):
@@ -76,8 +87,9 @@ class MujocoRodView(QWidget):
         self._cam.lookat[:] = [0.0, 0.0, 0.1]
 
         # Trajectory state
-        self._positions = None   # (T, 3, N+1)
-        self._radii = None       # (N,)
+        self._positions = None   # list[(T, 3, N+1)]
+        self._radii = None       # list[(N,)]
+        self._names = None
         self._times = None       # (T,)
         self._frame = 0
 
@@ -91,24 +103,43 @@ class MujocoRodView(QWidget):
 
     def set_static(self, positions: np.ndarray, radii: np.ndarray, autoframe=True):
         """Show a single undeformed rod. positions: (3, N+1), radii: (N,)."""
-        positions = np.asarray(positions)[None, ...]  # (1, 3, N+1)
-        self._positions = positions
-        self._radii = np.asarray(radii)
-        self._times = np.zeros(1)
-        self._frame = 0
-        self._message = None
-        if autoframe:
-            self._autoframe()
-        self._render_current()
+        positions = np.asarray(positions)[None, ...]
+        self.set_trajectories([positions], [radii], np.zeros(1), autoframe=autoframe)
 
     def set_trajectory(self, positions: np.ndarray, radii: np.ndarray,
                        times: np.ndarray = None, autoframe=True):
         """Load a full trajectory. positions: (T, 3, N+1), radii: (N,)."""
-        self._positions = np.asarray(positions)
-        self._radii = np.asarray(radii)
+        positions = np.asarray(positions)
         if times is None:
-            times = np.arange(len(self._positions), dtype=float)
-        self._times = np.asarray(times)
+            times = np.arange(len(positions), dtype=float)
+        self.set_trajectories([positions], [radii], times, autoframe=autoframe)
+
+    def set_trajectories(self, positions, radii, times=None, names=None,
+                         autoframe=True):
+        """Load one or more rods, all sampled at the same frame times."""
+        if not positions or len(positions) != len(radii):
+            raise ValueError("positions and radii require the same nonzero rod count")
+        position_arrays = [np.asarray(value) for value in positions]
+        radius_arrays = [np.asarray(value) for value in radii]
+        frame_count = position_arrays[0].shape[0]
+        if times is None:
+            times = np.arange(frame_count, dtype=float)
+        times = np.asarray(times)
+        for index, (position, radius) in enumerate(zip(position_arrays, radius_arrays)):
+            if position.ndim != 3 or position.shape[1] != 3:
+                raise ValueError(f"Rod {index} positions must have shape [T, 3, N+1]")
+            if position.shape[0] != frame_count:
+                raise ValueError("All rods must have the same frame count")
+            if radius.shape != (position.shape[2] - 1,):
+                raise ValueError(f"Rod {index} radius count does not match its elements")
+        if times.shape != (frame_count,):
+            raise ValueError("times must have one value per frame")
+        self._positions = position_arrays
+        self._radii = radius_arrays
+        self._times = times
+        self._names = list(names) if names is not None else [
+            f"rod_{index}" for index in range(len(position_arrays))
+        ]
         self._frame = 0
         self._message = None
         if autoframe:
@@ -125,7 +156,7 @@ class MujocoRodView(QWidget):
 
     @property
     def n_frames(self) -> int:
-        return 0 if self._positions is None else len(self._positions)
+        return 0 if self._positions is None else len(self._times)
 
     def current_time(self) -> float:
         if self._times is None or self.n_frames == 0:
@@ -146,7 +177,9 @@ class MujocoRodView(QWidget):
         """Center and scale the camera to the full extent of the rod motion."""
         if self._positions is None:
             return
-        allpts = self._positions.transpose(0, 2, 1).reshape(-1, 3)
+        allpts = np.concatenate(
+            [value.transpose(0, 2, 1).reshape(-1, 3) for value in self._positions]
+        )
         lo = allpts.min(axis=0)
         hi = allpts.max(axis=0)
         center = (lo + hi) / 2.0
@@ -171,24 +204,25 @@ class MujocoRodView(QWidget):
         self._renderer.update_scene(self._data, self._cam, self._opt)
         scene = self._renderer.scene
 
-        pos = self._positions[min(self._frame, self.n_frames - 1)]  # (3, N+1)
-        nodes = pos.T  # (N+1, 3)
-        radii = self._radii
-        n_el = min(len(radii), nodes.shape[0] - 1)
-
-        for k in range(n_el):
-            if scene.ngeom >= scene.maxgeom:
-                break
-            g = scene.geoms[scene.ngeom]
-            mujoco.mjv_initGeom(
-                g, mujoco.mjtGeom.mjGEOM_CAPSULE,
-                np.zeros(3), np.zeros(3), np.zeros(9), ROD_COLOR,
-            )
-            mujoco.mjv_connector(
-                g, mujoco.mjtGeom.mjGEOM_CAPSULE, float(radii[k]),
-                nodes[k].astype(np.float64), nodes[k + 1].astype(np.float64),
-            )
-            scene.ngeom += 1
+        frame = min(self._frame, self.n_frames - 1)
+        for rod_index, (positions, radii) in enumerate(
+            zip(self._positions, self._radii)
+        ):
+            nodes = positions[frame].T
+            color = ROD_COLORS[rod_index % len(ROD_COLORS)]
+            for k in range(min(len(radii), nodes.shape[0] - 1)):
+                if scene.ngeom >= scene.maxgeom:
+                    break
+                g = scene.geoms[scene.ngeom]
+                mujoco.mjv_initGeom(
+                    g, mujoco.mjtGeom.mjGEOM_CAPSULE,
+                    np.zeros(3), np.zeros(3), np.zeros(9), color,
+                )
+                mujoco.mjv_connector(
+                    g, mujoco.mjtGeom.mjGEOM_CAPSULE, float(radii[k]),
+                    nodes[k].astype(np.float64), nodes[k + 1].astype(np.float64),
+                )
+                scene.ngeom += 1
 
         rgb = self._renderer.render()  # (H, W, 3) uint8
         h, w, _ = rgb.shape

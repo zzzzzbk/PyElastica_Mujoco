@@ -61,15 +61,29 @@ class RodConfig:
 
 @dataclass
 class EnvConfig:
-    """Environment: gravity and an optional ground plane."""
+    """Environment: gravity, an optional ground plane, and contact options."""
 
     gravity_on: bool = True
     gravity_g: float = -9.80665
     plane_on: bool = False           # show a ground plane
     plane_z: float = 0.0             # plane height (world z)
-    plane_collision: bool = False    # enable rod<->plane contact in the sim
-    collision_k: float = 50.0        # contact stiffness
-    collision_nu: float = 10.0       # contact damping
+
+    # Contact toggles, each with its own stiffness (k) and damping (nu).
+    self_contact_on: bool = False    # rod self contact
+    self_contact_k: float = 50.0
+    self_contact_nu: float = 10.0
+
+    mutual_contact_on: bool = False  # rod<->rod contact (multi-rod sims)
+    mutual_contact_k: float = 50.0
+    mutual_contact_nu: float = 10.0
+
+    plane_contact_on: bool = False   # rod<->plane contact
+    plane_contact_k: float = 50.0
+    plane_contact_nu: float = 10.0
+
+    plane_friction_on: bool = False  # rod<->plane frictional contact
+    plane_friction_k: float = 50.0
+    plane_friction_nu: float = 10.0
 
 
 @dataclass
@@ -208,14 +222,27 @@ def from_xml(path: str | Path) -> tuple[RodConfig, SimConfig]:
     env_el = sim_el.find("environment")
     if env_el is not None:
         eg = env_el.get
+        # Backward compatibility: legacy files used plane_collision/collision_k/nu.
+        legacy_plane_contact = _b(eg("plane_collision", "False"))
+        legacy_k = float(eg("collision_k", 50.0))
+        legacy_nu = float(eg("collision_nu", 10.0))
         env = EnvConfig(
             gravity_on=_b(eg("gravity_on", "True")),
             gravity_g=float(eg("gravity_g", -9.80665)),
             plane_on=_b(eg("plane_on", "False")),
             plane_z=float(eg("plane_z", 0.0)),
-            plane_collision=_b(eg("plane_collision", "False")),
-            collision_k=float(eg("collision_k", 50.0)),
-            collision_nu=float(eg("collision_nu", 10.0)),
+            self_contact_on=_b(eg("self_contact_on", "False")),
+            self_contact_k=float(eg("self_contact_k", 50.0)),
+            self_contact_nu=float(eg("self_contact_nu", 10.0)),
+            mutual_contact_on=_b(eg("mutual_contact_on", "False")),
+            mutual_contact_k=float(eg("mutual_contact_k", 50.0)),
+            mutual_contact_nu=float(eg("mutual_contact_nu", 10.0)),
+            plane_contact_on=_b(eg("plane_contact_on", str(legacy_plane_contact))),
+            plane_contact_k=float(eg("plane_contact_k", legacy_k)),
+            plane_contact_nu=float(eg("plane_contact_nu", legacy_nu)),
+            plane_friction_on=_b(eg("plane_friction_on", "False")),
+            plane_friction_k=float(eg("plane_friction_k", 50.0)),
+            plane_friction_nu=float(eg("plane_friction_nu", 10.0)),
         )
     else:
         env = EnvConfig()
