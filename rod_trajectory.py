@@ -32,6 +32,7 @@ def _unpack_array(value):
 
 
 def _normalise_history(system: dict, index: int) -> dict:
+    system_type = system.get("type", "cosserat_rod")
     time = _unpack_array(system["time"]).astype(np.float64, copy=False)
     position = _unpack_array(system["position"]).astype(np.float32, copy=False)
     radius = _unpack_array(system["radius"]).astype(np.float32, copy=False)
@@ -39,6 +40,10 @@ def _normalise_history(system: dict, index: int) -> dict:
         radius = radius[0]
     if time.ndim != 1 or time.size < 1 or position.ndim != 3 or position.shape[1] != 3:
         raise ValueError(f"Rod {index} has invalid time or position dimensions")
+    if system_type == "rigid_cylinder":
+        if position.shape[2] < 2 or radius.shape != (1,):
+            raise ValueError(f"Rigid cylinder {index} requires endpoints and one radius")
+        position = position[:, :, [0, -1]]
     if position.shape[0] != time.size or radius.shape != (position.shape[2] - 1,):
         raise ValueError(f"Rod {index} frame/node/radius counts do not match")
     if time.size > 1 and np.any(np.diff(time) <= 0.0):
@@ -52,6 +57,7 @@ def _normalise_history(system: dict, index: int) -> dict:
         raise ValueError(f"Rod {index} contains non-finite time or position data")
     output = {
         "name": str(system.get("name", f"rod_{index}")),
+        "type": system_type,
         "time": time,
         "position": position,
         "radius": radius,
@@ -87,7 +93,7 @@ def save_dat(history: dict | list[dict], recording_fps: int, path: str | Path,
             raise ValueError("All rods must use identical time samples")
         system = {
             "name": normal["name"],
-            "type": "cosserat_rod",
+            "type": normal["type"],
             "time": _pack_array(normal["time"], np.float64),
             "position": _pack_array(normal["position"], np.float32),
             "radius": _pack_array(normal["radius"], np.float32),
@@ -113,6 +119,8 @@ def load_dat(path: str | Path) -> tuple[list[dict], int]:
     """Load unified or legacy DAT; return (rod histories, recording_fps)."""
     with Path(path).open("rb") as handle:
         data = pickle.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError("DAT file must contain a dictionary")
     format_name = data.get("format")
     if format_name not in (
         None,
@@ -125,6 +133,29 @@ def load_dat(path: str | Path) -> tuple[list[dict], int]:
     systems = data.get("systems", [])
     if not systems:
         raise ValueError("DAT file contains no rod systems")
+    named_legacy_systems = isinstance(systems, dict)
+    if named_legacy_systems:
+        if format_name is not None:
+            raise ValueError("Versioned DAT systems must be a list")
+        # Older multi-rod callbacks used names as dictionary keys. The rigid
+        # cylinder's first and last position nodes are its two endpoints.
+        rods = []
+        for name, system in systems.items():
+            if name == "rigid":
+                if not isinstance(system, dict):
+                    raise ValueError("Legacy rigid system must be a dictionary")
+                rods.append(dict(system, name=name, type="rigid_cylinder"))
+                continue
+            if not isinstance(name, str) or not name.startswith("rod") or not name[3:].isdigit():
+                continue
+            if not isinstance(system, dict):
+                raise ValueError(f"Legacy system {name!r} must be a dictionary")
+            rods.append(dict(system, name=name))
+        if not rods:
+            raise ValueError("Legacy DAT contains no supported systems")
+        systems = rods
+    elif not isinstance(systems, list):
+        raise ValueError("DAT systems must be a list or legacy named dictionary")
     histories = [
         _normalise_history(system, index) for index, system in enumerate(systems)
     ]
@@ -136,7 +167,10 @@ def load_dat(path: str | Path) -> tuple[list[dict], int]:
         for item in histories[1:]
     ):
         raise ValueError("All rods must use identical time samples")
-    fps = int(round(float(data.get("recording_fps", 30))))
+    if named_legacy_systems and "recording_fps" not in data and reference_time.size > 1:
+        fps = int(round(1.0 / float(np.median(np.diff(reference_time)))))
+    else:
+        fps = int(round(float(data.get("recording_fps", 30))))
     return histories, fps
 
 

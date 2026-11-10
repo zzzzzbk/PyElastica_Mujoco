@@ -661,7 +661,8 @@ class MainWindow(QMainWindow):
         self._history_fps = fps
         positions, radii, times = es.histories_to_arrays(histories)
         names = [item.get("name", f"rod_{i}") for i, item in enumerate(histories)]
-        self.view.set_trajectories(positions, radii, times, names=names)
+        types = [item.get("type", "cosserat_rod") for item in histories]
+        self.view.set_trajectories(positions, radii, times, names=names, types=types)
         n = self.view.n_frames
         self.frame_slider.setRange(0, max(0, n - 1))
         self.frame_slider.setValue(0)

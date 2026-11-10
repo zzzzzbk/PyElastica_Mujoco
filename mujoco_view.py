@@ -90,6 +90,7 @@ class MujocoRodView(QWidget):
         self._positions = None   # list[(T, 3, N+1)]
         self._radii = None       # list[(N,)]
         self._names = None
+        self._types = None
         self._times = None       # (T,)
         self._frame = 0
 
@@ -115,12 +116,15 @@ class MujocoRodView(QWidget):
         self.set_trajectories([positions], [radii], times, autoframe=autoframe)
 
     def set_trajectories(self, positions, radii, times=None, names=None,
-                         autoframe=True):
-        """Load one or more rods, all sampled at the same frame times."""
+                         autoframe=True, types=None):
+        """Load rods and rigid cylinders sampled at the same frame times."""
         if not positions or len(positions) != len(radii):
             raise ValueError("positions and radii require the same nonzero rod count")
         position_arrays = [np.asarray(value) for value in positions]
         radius_arrays = [np.asarray(value) for value in radii]
+        system_types = list(types) if types is not None else ["cosserat_rod"] * len(positions)
+        if len(system_types) != len(positions):
+            raise ValueError("types must match the number of trajectories")
         frame_count = position_arrays[0].shape[0]
         if times is None:
             times = np.arange(frame_count, dtype=float)
@@ -132,6 +136,8 @@ class MujocoRodView(QWidget):
                 raise ValueError("All rods must have the same frame count")
             if radius.shape != (position.shape[2] - 1,):
                 raise ValueError(f"Rod {index} radius count does not match its elements")
+            if system_types[index] == "rigid_cylinder" and position.shape[2] != 2:
+                raise ValueError(f"Rigid cylinder {index} requires two endpoints")
         if times.shape != (frame_count,):
             raise ValueError("times must have one value per frame")
         self._positions = position_arrays
@@ -140,6 +146,7 @@ class MujocoRodView(QWidget):
         self._names = list(names) if names is not None else [
             f"rod_{index}" for index in range(len(position_arrays))
         ]
+        self._types = system_types
         self._frame = 0
         self._message = None
         if autoframe:
@@ -209,17 +216,21 @@ class MujocoRodView(QWidget):
             zip(self._positions, self._radii)
         ):
             nodes = positions[frame].T
-            color = ROD_COLORS[rod_index % len(ROD_COLORS)]
+            rigid = self._types[rod_index] == "rigid_cylinder"
+            color = (np.array([0.2, 0.3, 0.9, 1.0], dtype=np.float32)
+                     if rigid else ROD_COLORS[rod_index % len(ROD_COLORS)])
+            geom_type = (mujoco.mjtGeom.mjGEOM_CYLINDER if rigid
+                         else mujoco.mjtGeom.mjGEOM_CAPSULE)
             for k in range(min(len(radii), nodes.shape[0] - 1)):
                 if scene.ngeom >= scene.maxgeom:
                     break
                 g = scene.geoms[scene.ngeom]
                 mujoco.mjv_initGeom(
-                    g, mujoco.mjtGeom.mjGEOM_CAPSULE,
+                    g, geom_type,
                     np.zeros(3), np.zeros(3), np.zeros(9), color,
                 )
                 mujoco.mjv_connector(
-                    g, mujoco.mjtGeom.mjGEOM_CAPSULE, float(radii[k]),
+                    g, geom_type, float(radii[k]),
                     nodes[k].astype(np.float64), nodes[k + 1].astype(np.float64),
                 )
                 scene.ngeom += 1

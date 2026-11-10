@@ -61,6 +61,50 @@ class RodTrajectoryTests(unittest.TestCase):
         self.assertEqual(fps, 24)
         self.assertEqual(histories[0]["radius"].shape, (4,))
 
+    def test_legacy_named_multi_rod_callback_load_and_resave(self):
+        first = _history("unused")
+        second = _history("unused", 0.2)
+        legacy = {
+            "systems": {
+                "rod0": {
+                    "time": list(first["time"]),
+                    "position": list(first["position"]),
+                    "radius": [first["radius"]] * 3,
+                    "director": list(first["directors"]),
+                },
+                "rod1": {
+                    "time": list(second["time"]),
+                    "position": list(second["position"]),
+                    "radius": [second["radius"] * (1 + 0.1 * t) for t in range(3)],
+                },
+                "rigid": {
+                    "time": list(first["time"]),
+                    "position": [np.tile(np.linspace(0, 0.7, 10), (3, 1))] * 3,
+                    "radius": [np.array([0.03])] * 3,
+                },
+            },
+            "LK": {"rod0": [0.0] * 3},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            old_path = Path(directory) / "old.dat"
+            new_path = Path(directory) / "new.dat"
+            with old_path.open("wb") as handle:
+                pickle.dump(legacy, handle)
+            histories, fps = rt.load_dat(old_path)
+            rt.save_dat(histories, fps, new_path)
+            converted, converted_fps = rt.load_dat(new_path)
+        self.assertEqual([item["name"] for item in histories], ["rod0", "rod1", "rigid"])
+        self.assertEqual(histories[2]["type"], "rigid_cylinder")
+        self.assertEqual(histories[2]["position"].shape, (3, 3, 2))
+        self.assertAlmostEqual(float(histories[2]["radius"][0]), 0.03)
+        self.assertEqual(fps, 10)
+        self.assertEqual(converted_fps, fps)
+        np.testing.assert_array_equal(histories[1]["radius"], second["radius"])
+        np.testing.assert_array_equal(converted[1]["position"], histories[1]["position"])
+        np.testing.assert_array_equal(converted[2]["position"], histories[2]["position"])
+        self.assertEqual(converted[2]["type"], "rigid_cylinder")
+        self.assertEqual(histories[0]["directors"].shape, (3, 3, 3, 4))
+
 
 if __name__ == "__main__":
     unittest.main()
